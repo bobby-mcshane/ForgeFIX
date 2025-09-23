@@ -428,6 +428,15 @@ fn handle_req(req: Request, state_machine: &mut MyStateMachine) {
         Request::Logon { resp_sender } => {
             let _ = resp_sender.send(true);
         }
+        Request::SetSequenceNumbers {
+            resp_sender,
+            next_outbound,
+            expected_inbound,
+        } => {
+            // Set the sequence numbers directly in the state machine
+            state_machine.sequences.set_both(next_outbound, expected_inbound);
+            let _ = resp_sender.send(true);
+        }
     }
 }
 
@@ -640,6 +649,9 @@ async fn receive_logon_request(
             }
             Some(Request::Logout { resp_sender, .. }) => {
                 let _ = resp_sender.send(true);
+            }
+            Some(Request::SetSequenceNumbers { resp_sender, .. }) => {
+                let _ = resp_sender.send(false); // Can't set sequence numbers before logon
             }
             None => {
                 return None;

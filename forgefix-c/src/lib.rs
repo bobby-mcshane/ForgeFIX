@@ -17,9 +17,10 @@ pub enum CFixError {
     LogonFailed,
     LogoutFailed,
     SendMessageFailed,
+    SetSequenceNumbersFailed,
     NullPointer,
     BadString,
-    SettingRequired, 
+    SettingRequired,
     Unknown,
 }
 
@@ -32,6 +33,7 @@ impl<T> From<Result<T, ApplicationError>> for CFixError {
             Err(ApplicationError::LogonFailed) => CFixError::LogonFailed,
             Err(ApplicationError::LogoutFailed) => CFixError::LogoutFailed,
             Err(ApplicationError::SendMessageFailed) => CFixError::SendMessageFailed,
+            Err(ApplicationError::SetSequenceNumbersFailed) => CFixError::SetSequenceNumbersFailed,
             Err(ApplicationError::SettingRequired(..)) => CFixError::SettingRequired,
         }
     }

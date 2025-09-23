@@ -629,6 +629,10 @@ impl Sequences {
             Ok(())
         }
     }
+    pub(super) fn set_both(&self, next_outbound: u32, expected_inbound: u32) {
+        self.0.store(next_outbound, Ordering::SeqCst);
+        self.1.store(expected_inbound, Ordering::SeqCst);
+    }
 }
 
 impl From<(u32, u32)> for Sequences {

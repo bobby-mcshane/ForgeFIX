@@ -131,6 +131,11 @@ enum Request {
     Logout {
         resp_sender: oneshot::Sender<bool>,
     },
+    SetSequenceNumbers {
+        resp_sender: oneshot::Sender<bool>,
+        next_outbound: u32,
+        expected_inbound: u32,
+    },
 }
 
 /// Errors that can occur while running ForgeFIX.
@@ -146,6 +151,8 @@ pub enum ApplicationError {
     LogoutFailed,
     #[error("MessageSend has failed")]
     SendMessageFailed,
+    #[error("SetSequenceNumbers has failed")]
+    SetSequenceNumbersFailed,
     #[error("setting `{0}` is required")]
     SettingRequired(String),
 }
@@ -491,6 +498,52 @@ impl FixApplicationHandle {
         let resp_receiver = self.send_message(builder)?;
         if Ok(true) != resp_receiver.blocking_recv() {
             return Err(ApplicationError::SendMessageFailed);
+        }
+        Ok(())
+    }
+
+    /// Send a request to the engine to set sequence numbers and return immediately.
+    ///
+    /// The receiver will eventually yield `true` if the sequence numbers were successfully set, or
+    /// `false` otherwise.
+    pub fn set_sequence_numbers(
+        &self,
+        next_outbound: u32,
+        expected_inbound: u32,
+    ) -> Result<oneshot::Receiver<bool>, ApplicationError> {
+        if self.request_sender.is_closed() {
+            return Err(ApplicationError::SessionEnded);
+        }
+        let (resp_sender, resp_receiver) = oneshot::channel();
+        let set_seq_request = Request::SetSequenceNumbers {
+            resp_sender,
+            next_outbound,
+            expected_inbound,
+        };
+        let _ = self.request_sender.send(set_seq_request);
+        Ok(resp_receiver)
+    }
+    /// Send a request to the engine to set sequence numbers and await asynchronously.
+    pub async fn set_sequence_numbers_async(
+        &self,
+        next_outbound: u32,
+        expected_inbound: u32,
+    ) -> Result<(), ApplicationError> {
+        let resp_sender = self.set_sequence_numbers(next_outbound, expected_inbound)?;
+        if Ok(true) != resp_sender.await {
+            return Err(ApplicationError::SetSequenceNumbersFailed);
+        }
+        Ok(())
+    }
+    /// Send a request to the engine to set sequence numbers and block until a result is returned.
+    pub fn set_sequence_numbers_sync(
+        &self,
+        next_outbound: u32,
+        expected_inbound: u32,
+    ) -> Result<(), ApplicationError> {
+        let resp_receiver = self.set_sequence_numbers(next_outbound, expected_inbound)?;
+        if Ok(true) != resp_receiver.blocking_recv() {
+            return Err(ApplicationError::SetSequenceNumbersFailed);
         }
         Ok(())
     }
