@@ -21,3 +21,6 @@ tokio = { version = "1.29.1", features = ["net", "macros", "rt", "rt-multi-threa
 [features]
 default = ["sqlite"]
 sqlite = ["rusqlite"]
+
+[dev-dependencies]
+tempfile = "3"

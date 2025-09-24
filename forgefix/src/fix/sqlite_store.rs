@@ -1,7 +1,7 @@
 use anyhow::Result;
 
-use crate::SessionSettings;
 use crate::fix::mem::MsgBuf;
+use crate::SessionSettings;
 
 use std::sync::Arc;
 use std::time::Instant;

@@ -9,13 +9,13 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use thiserror::Error;
 
 use crate::fix::decode::{parse_field, parse_sending_time};
 use crate::fix::encode::{AdditionalHeaders, MessageBuilder, SerializedInt};
 use crate::fix::generated::{
-    GapFillFlag, PossDupFlag, SessionRejectReason, Tags, is_session_message,
+    is_session_message, GapFillFlag, PossDupFlag, SessionRejectReason, Tags,
 };
 use crate::fix::log::{FileLogger, Logger};
 use crate::fix::resend::Transformer;
@@ -391,7 +391,7 @@ pub(super) async fn spin_session(
                 ).await?;
             }
             Some(req) = request_receiver.recv() => {
-                handle_req(req, &mut state_machine);
+                handle_req(req, &mut state_machine, &store, &settings);
             }
             _ = timeout_fut => {
                 state_machine.handle(timeout_event);
@@ -410,7 +410,12 @@ fn logout_duration(timeout_dur: &Duration) -> Duration {
     *timeout_dur * 2
 }
 
-fn handle_req(req: Request, state_machine: &mut MyStateMachine) {
+fn handle_req(
+    req: Request,
+    state_machine: &mut MyStateMachine,
+    store: &Store,
+    settings: &SessionSettings,
+) {
     match req {
         Request::SendMessage {
             resp_sender,
@@ -433,9 +438,19 @@ fn handle_req(req: Request, state_machine: &mut MyStateMachine) {
             next_outbound,
             expected_inbound,
         } => {
-            // Set the sequence numbers directly in the state machine
-            state_machine.sequences.set_both(next_outbound, expected_inbound);
-            let _ = resp_sender.send(true);
+            // Set the sequence numbers both in memory and in persistent storage
+            state_machine
+                .sequences
+                .set_both(next_outbound, expected_inbound);
+
+            // Also persist to store so they survive session restarts
+            let epoch = Arc::clone(&settings.epoch);
+            if let Err(e) = store.set_sequences(epoch, next_outbound, expected_inbound) {
+                eprintln!("Failed to persist sequence numbers to store: {:?}", e);
+                let _ = resp_sender.send(false);
+            } else {
+                let _ = resp_sender.send(true);
+            }
         }
     }
 }

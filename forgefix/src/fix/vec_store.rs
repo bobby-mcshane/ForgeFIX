@@ -1,8 +1,8 @@
-use crate::SessionSettings;
 use crate::fix::mem::MsgBuf;
+use crate::SessionSettings;
 use anyhow::Result;
-use chrono::DateTime;
 use chrono::offset::Utc;
+use chrono::DateTime;
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;

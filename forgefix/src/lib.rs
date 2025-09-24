@@ -424,6 +424,7 @@ impl SessionSettings {
 pub struct FixApplicationHandle {
     request_sender: mpsc::UnboundedSender<Request>,
     begin_string: Arc<String>,
+    settings: Arc<SessionSettings>,
 }
 
 impl FixApplicationHandle {
@@ -511,17 +512,79 @@ impl FixApplicationHandle {
         next_outbound: u32,
         expected_inbound: u32,
     ) -> Result<oneshot::Receiver<bool>, ApplicationError> {
-        if self.request_sender.is_closed() {
-            return Err(ApplicationError::SessionEnded);
-        }
         let (resp_sender, resp_receiver) = oneshot::channel();
-        let set_seq_request = Request::SetSequenceNumbers {
+        match self.request_sender.send(Request::SetSequenceNumbers {
             resp_sender,
             next_outbound,
             expected_inbound,
-        };
-        let _ = self.request_sender.send(set_seq_request);
-        Ok(resp_receiver)
+        }) {
+            Ok(()) => Ok(resp_receiver),
+            Err(_) => {
+                #[cfg(feature = "sqlite")]
+                {
+                    self.persist_sequences_offline(next_outbound, expected_inbound)?;
+                    let (offline_sender, offline_receiver) = oneshot::channel();
+                    let _ = offline_sender.send(true);
+                    Ok(offline_receiver)
+                }
+                #[cfg(not(feature = "sqlite"))]
+                {
+                    Err(ApplicationError::SessionEnded)
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn persist_sequences_offline(
+        &self,
+        next_outbound: u32,
+        expected_inbound: u32,
+    ) -> Result<(), ApplicationError> {
+        use rusqlite::{params, Connection};
+
+        let store_path = &self.settings.store_path;
+        if let Some(parent) = store_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|_| ApplicationError::SetSequenceNumbersFailed)?;
+        }
+
+        let conn =
+            Connection::open(store_path).map_err(|_| ApplicationError::SetSequenceNumbersFailed)?;
+        let epoch = self.settings.epoch.as_ref();
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sequences (epoch_guid VARCHAR, next_incoming INTEGER, next_outgoing INTEGER)",
+            [],
+        )
+        .map_err(|_| ApplicationError::SetSequenceNumbersFailed)?;
+
+        conn.execute(
+            "INSERT INTO sequences(epoch_guid, next_incoming, next_outgoing) SELECT ?1,1,1 WHERE NOT EXISTS (SELECT * FROM sequences WHERE epoch_guid = ?1);",
+            params![epoch],
+        )
+        .map_err(|_| ApplicationError::SetSequenceNumbersFailed)?;
+
+        conn.execute(
+            "UPDATE sequences SET next_outgoing = ?1, next_incoming = ?2 WHERE epoch_guid = ?3",
+            params![next_outbound, expected_inbound, epoch],
+        )
+        .map_err(|_| ApplicationError::SetSequenceNumbersFailed)?;
+
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn new_for_tests(
+        request_sender: mpsc::UnboundedSender<Request>,
+        begin_string: Arc<String>,
+        settings: Arc<SessionSettings>,
+    ) -> Self {
+        FixApplicationHandle {
+            request_sender,
+            begin_string,
+            settings,
+        }
     }
     /// Send a request to the engine to set sequence numbers and await asynchronously.
     pub async fn set_sequence_numbers_async(
@@ -587,6 +650,63 @@ impl FixApplicationHandle {
     }
 }
 
+#[cfg(all(test, feature = "sqlite"))]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn set_sequence_numbers_on_closed_session_updates_store() {
+        let tmp_dir = tempdir().expect("temp dir");
+        let store_path = tmp_dir.path().join("session.sqlite");
+        let log_dir = tmp_dir.path().join("log");
+        std::fs::create_dir_all(&log_dir).expect("log dir");
+
+        let sender = "SENDER";
+        let target = "TARGET";
+        let epoch = format!("{}_{}", sender, target);
+
+        let settings = SessionSettings::builder()
+            .with_sender_comp_id(sender)
+            .with_target_comp_id(target)
+            .with_socket_addr("127.0.0.1:0".parse().unwrap())
+            .with_store_path(store_path.clone())
+            .with_log_dir(log_dir)
+            .build()
+            .expect("settings");
+
+        let settings = Arc::new(settings);
+
+        let (sender, receiver) = mpsc::unbounded_channel();
+        drop(receiver);
+
+        let handle = FixApplicationHandle::new_for_tests(
+            sender,
+            Arc::new(String::from("FIX.4.2")),
+            Arc::clone(&settings),
+        );
+
+        handle
+            .set_sequence_numbers_sync(7, 11)
+            .expect("offline sequence update");
+
+        let conn = Connection::open(store_path).expect("open store");
+        let (incoming, outgoing): (u32, u32) = conn
+            .query_row(
+                "SELECT next_incoming, next_outgoing FROM sequences WHERE epoch_guid = ?1",
+                [&epoch],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("query sequences");
+
+        assert_eq!(incoming, 11);
+        assert_eq!(outgoing, 7);
+    }
+}
+
 /// A struct that can initiate the TCP connection to the peer and create a FIX engine instance.
 pub struct FixApplicationInitiator {
     settings: SessionSettings,
@@ -629,6 +749,7 @@ impl FixApplicationInitiator {
         let (app_message_event_sender, app_message_event_receiver) =
             mpsc::unbounded_channel::<Arc<MsgBuf>>();
         let begin_string = Arc::clone(&self.settings.begin_string);
+        let settings_clone = self.settings.clone();
 
         tokio::spawn(async move {
             if let Err(e) = fix::spin_session(
@@ -646,6 +767,7 @@ impl FixApplicationInitiator {
         let handle = FixApplicationHandle {
             request_sender,
             begin_string,
+            settings: Arc::new(settings_clone),
         };
 
         Ok((handle, app_message_event_receiver))
@@ -662,6 +784,7 @@ impl FixApplicationInitiator {
             mpsc::unbounded_channel::<Arc<MsgBuf>>();
         let begin_string = Arc::clone(&self.settings.begin_string);
         let stream = runtime.block_on(self.stream_factory.stream())?;
+        let settings_clone = self.settings.clone();
 
         std::thread::spawn(move || {
             if let Err(e) = runtime.block_on(fix::spin_session(
@@ -676,6 +799,7 @@ impl FixApplicationInitiator {
         let handle = FixApplicationHandle {
             request_sender,
             begin_string,
+            settings: Arc::new(settings_clone),
         };
 
         Ok((handle, app_message_event_receiver))
@@ -728,6 +852,7 @@ impl FixApplicationAcceptor {
         let (app_message_event_sender, app_message_event_receiver) =
             mpsc::unbounded_channel::<Arc<MsgBuf>>();
         let begin_string = Arc::clone(&self.settings.begin_string);
+        let settings_for_handle = self.settings.clone();
 
         tokio::task::spawn(async move {
             if let Err(e) =
@@ -741,6 +866,7 @@ impl FixApplicationAcceptor {
         let handle = FixApplicationHandle {
             request_sender,
             begin_string,
+            settings: Arc::new(settings_for_handle),
         };
 
         Ok((handle, app_message_event_receiver))
