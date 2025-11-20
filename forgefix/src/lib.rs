@@ -110,7 +110,7 @@ use fix::encode::MessageBuilder;
 use fix::mem::MsgBuf;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -311,7 +311,10 @@ impl SessionSettingsBuilder {
             begin_string: Arc::new(self.begin_string.unwrap_or(String::from("FIX.4.2"))),
             epoch: Arc::new(
                 self.epoch
-                    .unwrap_or(format!("{}_{}", &sender_comp_id, &target_comp_id)),
+                    .unwrap_or(SessionSettings::default_epoch(
+                        &sender_comp_id,
+                        &target_comp_id,
+                    )),
             ),
             heartbeat_timeout: self.heartbeat_timeout.unwrap_or(Duration::from_secs(30)),
             start_time: self.start_time.unwrap_or_default(),
@@ -330,6 +333,22 @@ impl SessionSettings {
         SessionSettingsBuilder::new()
     }
 
+    /// Compute the default epoch used when none is explicitly provided.
+    pub fn default_epoch(sender_comp_id: &str, target_comp_id: &str) -> String {
+        format!("{}_{}", sender_comp_id, target_comp_id)
+    }
+
+    /// The epoch identifier for this session.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    /// The path to the backing store for this session.
+    pub fn store_path(&self) -> &Path {
+        &self.store_path
+    }
+
+
     fn expected_sender_comp_id(&self) -> &str {
         &self.target_comp_id
     }
@@ -337,6 +356,26 @@ impl SessionSettings {
     fn expected_target_comp_id(&self) -> &str {
         &self.sender_comp_id
     }
+}
+
+/// Persist sequence numbers for a disconnected FIX session directly to the backing store.
+#[cfg(feature = "sqlite")]
+pub fn set_persisted_sequence_numbers(
+    store_path: impl AsRef<Path>,
+    epoch: &str,
+    next_outbound: u32,
+    expected_inbound: u32,
+) -> Result<(), ApplicationError> {
+    crate::fix::sqlite_store::persist_sequences(
+        store_path.as_ref(),
+        epoch,
+        next_outbound,
+        expected_inbound,
+    )
+    .map_err(|e| ApplicationError::IoError(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        e,
+    )))
 }
 
 /// A handle on a FIX engine instance.

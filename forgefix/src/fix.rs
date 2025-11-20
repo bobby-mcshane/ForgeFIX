@@ -47,7 +47,7 @@ mod stream;
 mod validate;
 
 #[cfg(feature = "sqlite")]
-mod sqlite_store;
+pub(crate) mod sqlite_store;
 #[cfg(feature = "sqlite")]
 use sqlite_store as store;
 
@@ -391,7 +391,7 @@ pub(super) async fn spin_session(
                 ).await?;
             }
             Some(req) = request_receiver.recv() => {
-                handle_req(req, &mut state_machine);
+                handle_req(req, &mut state_machine, &store, &epoch);
             }
             _ = timeout_fut => {
                 state_machine.handle(timeout_event);
@@ -410,7 +410,12 @@ fn logout_duration(timeout_dur: &Duration) -> Duration {
     *timeout_dur * 2
 }
 
-fn handle_req(req: Request, state_machine: &mut MyStateMachine) {
+fn handle_req(
+    req: Request,
+    state_machine: &mut MyStateMachine,
+    store: &Store,
+    epoch: &Arc<String>,
+) {
     match req {
         Request::SendMessage {
             resp_sender,
@@ -435,7 +440,15 @@ fn handle_req(req: Request, state_machine: &mut MyStateMachine) {
         } => {
             // Set the sequence numbers directly in the state machine
             state_machine.sequences.set_both(next_outbound, expected_inbound);
-            let _ = resp_sender.send(true);
+            let result = store.set_sequences(
+                Arc::clone(epoch),
+                next_outbound,
+                expected_inbound,
+            );
+            if let Err(e) = &result {
+                eprintln!("{e}: error setting sequence numbers");
+            }
+            let _ = resp_sender.send(result.is_ok());
         }
     }
 }

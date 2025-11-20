@@ -3,6 +3,7 @@ use anyhow::Result;
 use crate::SessionSettings;
 use crate::fix::mem::MsgBuf;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -38,6 +39,18 @@ enum StoreRequest {
     SetSequences(Arc<String>, u32, u32),
     LastSendTime(Arc<String>, oneshot::Sender<Result<Option<DateTime<Utc>>>>),
     Disconnect(oneshot::Sender<Result<()>>),
+}
+
+/// Persist updated sequence numbers directly to the sqlite store without running a FIX session.
+pub fn persist_sequences(
+    store_path: &Path,
+    epoch: &str,
+    next_outgoing: u32,
+    next_incoming: u32,
+) -> Result<()> {
+    let conn = rusqlite::Connection::open(store_path)?;
+    setup(&conn, epoch)?;
+    set_sequences(&conn, epoch, next_outgoing, next_incoming)
 }
 
 pub struct Store {
@@ -247,4 +260,29 @@ fn last_send_time(conn: &rusqlite::Connection, epoch: &str) -> Result<Option<Dat
             row.get::<usize, NaiveDateTime>(0).map(|n| n.and_utc())
         })
         .optional()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use super::{get_sequences, persist_sequences, setup};
+
+    #[test]
+    fn persist_sequences_updates_store() -> Result<()> {
+        let tmp_dir = tempfile::tempdir()?;
+        let store_path = tmp_dir.path().join("store.db");
+        let epoch = "sender_target";
+
+        persist_sequences(&store_path, epoch, 5, 7)?;
+        let conn = rusqlite::Connection::open(&store_path)?;
+        setup(&conn, epoch)?;
+        let (next_incoming, next_outgoing) = get_sequences(&conn, epoch)?;
+        assert_eq!((next_outgoing, next_incoming), (5, 7));
+
+        persist_sequences(&store_path, epoch, 11, 13)?;
+        let (next_incoming, next_outgoing) = get_sequences(&conn, epoch)?;
+        assert_eq!((next_outgoing, next_incoming), (11, 13));
+
+        Ok(())
+    }
 }
