@@ -2,6 +2,7 @@ use crate::fix::encode::{MessageBuilder, SerializedInt};
 use crate::fix::generated::{GapFillFlag, MsgType, PossDupFlag, SessionRejectReason, Tags};
 use crate::fix::{GarbledMessageType, SessionError};
 use crate::SessionSettings;
+use log::{debug, warn};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -65,6 +66,26 @@ pub(super) enum Event {
     LogoutExpired,
 }
 impl Event {
+    fn name(&self) -> &'static str {
+        match self {
+            Event::Connect(..) => "Connect",
+            Event::Accept => "Accept",
+            Event::LogonReceived(..) => "LogonReceived",
+            Event::LogoutSent => "LogoutSent",
+            Event::LogoutReceived(..) => "LogoutReceived",
+            Event::HeartbeatReceived(..) => "HeartbeatReceived",
+            Event::SequenceResetReceived { .. } => "SequenceResetReceived",
+            Event::TestRequestReceived { .. } => "TestRequestReceived",
+            Event::SessionErrorReceived { .. } => "SessionErrorReceived",
+            Event::ApplicationMessageReceived(..) => "ApplicationMessageReceived",
+            Event::SendHeartbeat => "SendHeartbeat",
+            Event::SendTestRequest(..) => "SendTestRequest",
+            Event::ResendRequestReceived(..) => "ResendRequestReceived",
+            Event::RejectReceived(..) => "RejectReceived",
+            Event::LogoutExpired => "LogoutExpired",
+        }
+    }
+
     fn get_msg_seq_num(&self) -> Option<u32> {
         match self {
             Event::LogonReceived(n, ..) => Some(*n),
@@ -114,6 +135,20 @@ impl Event {
 }
 
 impl MyStateMachine {
+    fn state_name(&self) -> &'static str {
+        match self.state {
+            State::Start => "Start",
+            State::Connected => "Connected",
+            State::LogonSent => "LogonSent",
+            State::LoggedIn => "LoggedIn",
+            State::ExpectingResends { .. } => "ExpectingResends",
+            State::ExpectingTestResponse => "ExpectingTestResponse",
+            State::LogoutSent => "LogoutSent",
+            State::End => "End",
+            State::Error => "Error",
+        }
+    }
+
     pub(super) fn new(settings: &SessionSettings, seqs: (u32, u32)) -> Self {
         MyStateMachine {
             outbox: VecDeque::new(),
@@ -180,10 +215,28 @@ impl MyStateMachine {
     fn process_sequence(&mut self, event: &Event, return_state: State) -> Option<Response> {
         event.get_msg_seq_num().and_then(|incoming| {
             let expected = self.sequences.peek_incoming();
+            debug!(
+                target: "forgefix_seq",
+                "sequence check; state={} event={} expected={} incoming={} poss_dup={} rereceive={:?}",
+                self.state_name(),
+                event.name(),
+                expected,
+                incoming,
+                event.is_poss_dup(),
+                self.rereceive_range
+            );
             if expected == incoming {
                 self.sequences.incr_incoming();
                 None
             } else if expected < incoming {
+                debug!(
+                    target: "forgefix_seq",
+                    "sequence gap; state={} event={} expected={} incoming={} -> resend request",
+                    self.state_name(),
+                    event.name(),
+                    expected,
+                    incoming
+                );
                 self.rereceive_range = Some((expected, incoming));
                 let message =
                     MessageBuilder::new(&self.begin_string, MsgType::RESEND_REQUEST.into())
@@ -194,6 +247,14 @@ impl MyStateMachine {
                     return_state: Arc::new(return_state),
                 }))
             } else if expected > incoming && !event.is_poss_dup() {
+                warn!(
+                    target: "forgefix_seq",
+                    "sequence too low; state={} event={} expected={} incoming={} poss_dup=false -> logout",
+                    self.state_name(),
+                    event.name(),
+                    expected,
+                    incoming
+                );
                 let message = build_logout_message_with_text(
                     &self.begin_string,
                     format!(
@@ -213,6 +274,13 @@ impl MyStateMachine {
         self.sequences = (1, 1).into()
     }
     fn reset_expected_incoming(&mut self, msg_seq_num: u32, new_seq_no: u32) {
+        debug!(
+            target: "forgefix_seq",
+            "sequence reset; msg_seq_num={} new_seq_no={} expected_before={}",
+            msg_seq_num,
+            new_seq_no,
+            self.sequences.peek_incoming()
+        );
         match self.sequences.reset_incoming(new_seq_no) {
             Ok(_) => {}
             Err(msg) => {
@@ -269,11 +337,25 @@ impl MyStateMachine {
         }
     }
     fn expecting_resends(&mut self, event: &Event, return_state: Arc<State>) -> Response {
+        let state_name = self.state_name();
+        let event_name = event.name();
+        let incoming_seq = event.get_msg_seq_num();
+        let poss_dup = event.is_poss_dup();
         let (next, end) = match self.rereceive_range.as_mut() {
             Some(v) => v,
             None => return Response::Transition(State::Error),
         };
 
+        debug!(
+            target: "forgefix_seq",
+            "expecting resends; state={} event={} incoming={:?} poss_dup={} range=({}, {})",
+            state_name,
+            event_name,
+            incoming_seq,
+            poss_dup,
+            next,
+            end
+        );
         if !event.is_poss_dup() {
             if matches!(event, Event::LogoutReceived(..)) {
                 let message = build_logout_message(&self.begin_string);
@@ -291,11 +373,25 @@ impl MyStateMachine {
             ..
         } = event
         {
+            debug!(
+                target: "forgefix_seq",
+                "sequence reset (non-gap); msg_seq_num={} new_seq_no={}",
+                msg_seq_num,
+                new_seq_no
+            );
             self.reset_expected_incoming(*msg_seq_num, *new_seq_no);
             return Response::Transition((*return_state).clone());
         }
 
         if event.get_msg_seq_num() != Some(*next) {
+            debug!(
+                target: "forgefix_seq",
+                "expecting resends; state={} event={} skipping unexpected seq; expected_next={} incoming={:?}",
+                state_name,
+                event_name,
+                next,
+                incoming_seq
+            );
             return Response::Handled;
         }
 
@@ -306,6 +402,12 @@ impl MyStateMachine {
 
         *next = next_seq_num;
         if next > end {
+            debug!(
+                target: "forgefix_seq",
+                "resend range complete; state={} expected_incoming -> {}",
+                state_name,
+                next
+            );
             let _ = self.sequences.reset_incoming(*next);
             self.rereceive_range = None;
             if matches!(*return_state, State::End) {
@@ -354,6 +456,12 @@ impl MyStateMachine {
                 new_seq_no,
                 ..
             } => {
+                debug!(
+                    target: "forgefix_seq",
+                    "sequence reset received; msg_seq_num={} new_seq_no={}",
+                    msg_seq_num,
+                    new_seq_no
+                );
                 self.reset_expected_incoming(*msg_seq_num, *new_seq_no);
                 Response::Handled
             }

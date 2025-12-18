@@ -131,6 +131,9 @@ fn validate_duplicate(
     sending_time: DateTime<Utc>,
     orig_sending_time: Option<DateTime<Utc>>,
 ) -> Result<(), SessionError> {
+    if msg_type == MsgType::SEQUENCE_RESET.into() {
+        return Ok(());
+    }
     if orig_sending_time.is_none() {
         return Err(SessionError::new_message_rejected(
             Some(SessionRejectReason::REQUIRED_TAG_MISSING),
