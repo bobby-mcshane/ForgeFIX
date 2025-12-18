@@ -361,7 +361,8 @@ impl MyStateMachine {
         let event_name = event.name();
         let incoming_seq = event.get_msg_seq_num();
         let poss_dup = event.is_poss_dup();
-        let (sender_comp_id, target_comp_id) = self.comp_ids();
+        let sender_comp_id = Arc::clone(&self.sender_comp_id);
+        let target_comp_id = Arc::clone(&self.target_comp_id);
         let (next, end) = match self.rereceive_range.as_mut() {
             Some(v) => v,
             None => return Response::Transition(State::Error),
@@ -370,8 +371,8 @@ impl MyStateMachine {
         debug!(
             target: "forgefix_seq",
             "expecting resends; sender={} target={} state={} event={} incoming={:?} poss_dup={} range=({}, {})",
-            sender_comp_id,
-            target_comp_id,
+            sender_comp_id.as_str(),
+            target_comp_id.as_str(),
             state_name,
             event_name,
             incoming_seq,
@@ -410,8 +411,8 @@ impl MyStateMachine {
             debug!(
                 target: "forgefix_seq",
                 "expecting resends; sender={} target={} state={} event={} skipping unexpected seq; expected_next={} incoming={:?}",
-                sender_comp_id,
-                target_comp_id,
+                sender_comp_id.as_str(),
+                target_comp_id.as_str(),
                 state_name,
                 event_name,
                 next,
@@ -430,8 +431,8 @@ impl MyStateMachine {
             debug!(
                 target: "forgefix_seq",
                 "resend range complete; sender={} target={} state={} expected_incoming -> {}",
-                sender_comp_id,
-                target_comp_id,
+                sender_comp_id.as_str(),
+                target_comp_id.as_str(),
                 state_name,
                 next
             );
