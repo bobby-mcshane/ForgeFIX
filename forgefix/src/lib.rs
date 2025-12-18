@@ -348,6 +348,14 @@ impl SessionSettings {
         &self.store_path
     }
 
+    pub(crate) fn sender_comp_id(&self) -> &str {
+        &self.sender_comp_id
+    }
+
+    pub(crate) fn target_comp_id(&self) -> &str {
+        &self.target_comp_id
+    }
+
 
     fn expected_sender_comp_id(&self) -> &str {
         &self.target_comp_id
