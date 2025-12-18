@@ -337,6 +337,10 @@ impl MyStateMachine {
         }
     }
     fn expecting_resends(&mut self, event: &Event, return_state: Arc<State>) -> Response {
+        let state_name = self.state_name();
+        let event_name = event.name();
+        let incoming_seq = event.get_msg_seq_num();
+        let poss_dup = event.is_poss_dup();
         let (next, end) = match self.rereceive_range.as_mut() {
             Some(v) => v,
             None => return Response::Transition(State::Error),
@@ -345,10 +349,10 @@ impl MyStateMachine {
         debug!(
             target: "forgefix_seq",
             "expecting resends; state={} event={} incoming={:?} poss_dup={} range=({}, {})",
-            self.state_name(),
-            event.name(),
-            event.get_msg_seq_num(),
-            event.is_poss_dup(),
+            state_name,
+            event_name,
+            incoming_seq,
+            poss_dup,
             next,
             end
         );
@@ -383,10 +387,10 @@ impl MyStateMachine {
             debug!(
                 target: "forgefix_seq",
                 "expecting resends; state={} event={} skipping unexpected seq; expected_next={} incoming={:?}",
-                self.state_name(),
-                event.name(),
+                state_name,
+                event_name,
                 next,
-                event.get_msg_seq_num()
+                incoming_seq
             );
             return Response::Handled;
         }
@@ -401,7 +405,7 @@ impl MyStateMachine {
             debug!(
                 target: "forgefix_seq",
                 "resend range complete; state={} expected_incoming -> {}",
-                self.state_name(),
+                state_name,
                 next
             );
             let _ = self.sequences.reset_incoming(*next);
