@@ -30,6 +30,8 @@ pub(super) struct MyStateMachine {
     pub(super) outbox: VecDeque<(MessageBuilder, Option<oneshot::Sender<bool>>)>, // https://github.com/mdeloof/statig/issues/7
     pub(super) sequences: Sequences,
     pub(super) begin_string: Arc<String>,
+    sender_comp_id: Arc<String>,
+    target_comp_id: Arc<String>,
     rereceive_range: Option<(u32, u32)>,
     logout_resp_sender: Option<oneshot::Sender<bool>>,
     logon_resp_sender: Option<oneshot::Sender<bool>>,
@@ -135,6 +137,10 @@ impl Event {
 }
 
 impl MyStateMachine {
+    fn comp_ids(&self) -> (&str, &str) {
+        (&self.sender_comp_id, &self.target_comp_id)
+    }
+
     fn state_name(&self) -> &'static str {
         match self.state {
             State::Start => "Start",
@@ -154,6 +160,8 @@ impl MyStateMachine {
             outbox: VecDeque::new(),
             sequences: seqs.into(),
             begin_string: Arc::clone(&settings.begin_string),
+            sender_comp_id: Arc::new(settings.sender_comp_id().to_string()),
+            target_comp_id: Arc::new(settings.target_comp_id().to_string()),
             logon_resp_sender: None,
             logout_resp_sender: None,
             rereceive_range: None,
@@ -215,9 +223,12 @@ impl MyStateMachine {
     fn process_sequence(&mut self, event: &Event, return_state: State) -> Option<Response> {
         event.get_msg_seq_num().and_then(|incoming| {
             let expected = self.sequences.peek_incoming();
+            let (sender_comp_id, target_comp_id) = self.comp_ids();
             debug!(
                 target: "forgefix_seq",
-                "sequence check; state={} event={} expected={} incoming={} poss_dup={} rereceive={:?}",
+                "sequence check; sender={} target={} state={} event={} expected={} incoming={} poss_dup={} rereceive={:?}",
+                sender_comp_id,
+                target_comp_id,
                 self.state_name(),
                 event.name(),
                 expected,
@@ -229,9 +240,12 @@ impl MyStateMachine {
                 self.sequences.incr_incoming();
                 None
             } else if expected < incoming {
+                let (sender_comp_id, target_comp_id) = self.comp_ids();
                 debug!(
                     target: "forgefix_seq",
-                    "sequence gap; state={} event={} expected={} incoming={} -> resend request",
+                    "sequence gap; sender={} target={} state={} event={} expected={} incoming={} -> resend request",
+                    sender_comp_id,
+                    target_comp_id,
                     self.state_name(),
                     event.name(),
                     expected,
@@ -247,9 +261,12 @@ impl MyStateMachine {
                     return_state: Arc::new(return_state),
                 }))
             } else if expected > incoming && !event.is_poss_dup() {
+                let (sender_comp_id, target_comp_id) = self.comp_ids();
                 warn!(
                     target: "forgefix_seq",
-                    "sequence too low; state={} event={} expected={} incoming={} poss_dup=false -> logout",
+                    "sequence too low; sender={} target={} state={} event={} expected={} incoming={} poss_dup=false -> logout",
+                    sender_comp_id,
+                    target_comp_id,
                     self.state_name(),
                     event.name(),
                     expected,
@@ -274,9 +291,12 @@ impl MyStateMachine {
         self.sequences = (1, 1).into()
     }
     fn reset_expected_incoming(&mut self, msg_seq_num: u32, new_seq_no: u32) {
+        let (sender_comp_id, target_comp_id) = self.comp_ids();
         debug!(
             target: "forgefix_seq",
-            "sequence reset; msg_seq_num={} new_seq_no={} expected_before={}",
+            "sequence reset; sender={} target={} msg_seq_num={} new_seq_no={} expected_before={}",
+            sender_comp_id,
+            target_comp_id,
             msg_seq_num,
             new_seq_no,
             self.sequences.peek_incoming()
@@ -341,6 +361,7 @@ impl MyStateMachine {
         let event_name = event.name();
         let incoming_seq = event.get_msg_seq_num();
         let poss_dup = event.is_poss_dup();
+        let (sender_comp_id, target_comp_id) = self.comp_ids();
         let (next, end) = match self.rereceive_range.as_mut() {
             Some(v) => v,
             None => return Response::Transition(State::Error),
@@ -348,7 +369,9 @@ impl MyStateMachine {
 
         debug!(
             target: "forgefix_seq",
-            "expecting resends; state={} event={} incoming={:?} poss_dup={} range=({}, {})",
+            "expecting resends; sender={} target={} state={} event={} incoming={:?} poss_dup={} range=({}, {})",
+            sender_comp_id,
+            target_comp_id,
             state_name,
             event_name,
             incoming_seq,
@@ -386,7 +409,9 @@ impl MyStateMachine {
         if event.get_msg_seq_num() != Some(*next) {
             debug!(
                 target: "forgefix_seq",
-                "expecting resends; state={} event={} skipping unexpected seq; expected_next={} incoming={:?}",
+                "expecting resends; sender={} target={} state={} event={} skipping unexpected seq; expected_next={} incoming={:?}",
+                sender_comp_id,
+                target_comp_id,
                 state_name,
                 event_name,
                 next,
@@ -404,7 +429,9 @@ impl MyStateMachine {
         if next > end {
             debug!(
                 target: "forgefix_seq",
-                "resend range complete; state={} expected_incoming -> {}",
+                "resend range complete; sender={} target={} state={} expected_incoming -> {}",
+                sender_comp_id,
+                target_comp_id,
                 state_name,
                 next
             );
@@ -456,9 +483,12 @@ impl MyStateMachine {
                 new_seq_no,
                 ..
             } => {
+                let (sender_comp_id, target_comp_id) = self.comp_ids();
                 debug!(
                     target: "forgefix_seq",
-                    "sequence reset received; msg_seq_num={} new_seq_no={}",
+                    "sequence reset received; sender={} target={} msg_seq_num={} new_seq_no={}",
+                    sender_comp_id,
+                    target_comp_id,
                     msg_seq_num,
                     new_seq_no
                 );
