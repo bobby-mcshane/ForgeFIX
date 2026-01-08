@@ -36,7 +36,10 @@ use crate::fix::checksum::AsyncChecksumWriter;
 use crate::fix::generated::Tags;
 use crate::SessionSettings;
 use chrono::{DateTime, Utc};
-use std::io::{Cursor, Write};
+use std::{
+    borrow::Cow,
+    io::{Cursor, Write},
+};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 /// The time format string represented in [chrono format syntax]
@@ -80,7 +83,7 @@ pub fn formatted_time() -> String {
 ///
 /// builder.push_mut(Tags::Symbol, b"TICKER SYMBOL");
 ///
-/// assert_eq!(builder.msg_type(), MsgType::ORDER_SINGLE.into());
+/// assert_eq!(builder.msg_type(), "D");
 ///
 /// # Ok(())
 /// # }
@@ -88,18 +91,27 @@ pub fn formatted_time() -> String {
 #[derive(Debug)]
 pub struct MessageBuilder {
     preamble: Cursor<[u8; 32]>, // e.g. 8=FIX.4.2^9=_________________
-    msg_type: char,
+    msg_type: Cow<'static, str>,
     main_buffer: Cursor<Vec<u8>>,
 }
 
 pub(super) const SOH: &[u8] = &[b'\x01'];
 
 impl MessageBuilder {
-    /// Creates a new [`MessageBuilder`] with `begin_string` and `msg_type`. It is helpful to use
-    /// [`MsgType`] variants for `msg_type`.
+    /// Creates a new [`MessageBuilder`] with `begin_string` and a single-character `msg_type`.
+    /// It is helpful to use [`MsgType`] variants for `msg_type`.
     ///
     /// [`MsgType`]: ../generated/enum.MsgType.html
     pub fn new(begin_string: &str, msg_type: char) -> Self {
+        Self::new_with_msg_type(begin_string, msg_type.to_string())
+    }
+
+    /// Creates a new [`MessageBuilder`] with `begin_string` and a multi-character `msg_type`.
+    /// This is useful for FIX variants that use multi-byte MsgType values (e.g. "AB", "AC").
+    pub fn new_with_msg_type(
+        begin_string: &str,
+        msg_type: impl Into<Cow<'static, str>>,
+    ) -> Self {
         let mut writer = Cursor::new([0_u8; 32]);
         writer
             .write_fmt(format_args!("8={}\x019=", begin_string))
@@ -108,7 +120,7 @@ impl MessageBuilder {
 
         MessageBuilder {
             preamble: writer,
-            msg_type,
+            msg_type: msg_type.into(),
             main_buffer,
         }
     }
@@ -136,7 +148,7 @@ impl MessageBuilder {
 
     fn body_len(&self) -> usize {
         let body_len = self.main_buffer.position() as usize;
-        let msg_type_len = 5;
+        let msg_type_len = 4 + self.msg_type.len();
         body_len + msg_type_len
     }
 
@@ -179,8 +191,8 @@ impl MessageBuilder {
     }
 
     /// Gets the `MsgType(35)` of this builder
-    pub fn msg_type(&self) -> char {
-        self.msg_type
+    pub fn msg_type(&self) -> &str {
+        &self.msg_type
     }
 }
 
