@@ -93,7 +93,7 @@ pub struct MessageBuilder {
 }
 
 pub(super) const SOH: &[u8] = &[b'\x01'];
-const MSG_TYPE_MAX: usize = 16;
+const MSG_TYPE_MAX: usize = 4;
 
 #[derive(Clone, Copy, Debug)]
 struct MsgTypeBuf {
