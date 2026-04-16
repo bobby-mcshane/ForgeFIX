@@ -55,13 +55,14 @@ impl<const N: usize> HeaderBuf<N> {
     }
 }
 
-pub(super) async fn read_message<const N: usize, T>(
+pub(super) async fn read_message<const N: usize, T, L>(
     r: &mut T,
     header: &mut HeaderBuf<N>,
-    logger: &mut impl Logger,
+    logger: &L,
 ) -> Result<MsgBuf, SessionError>
 where
     T: TryRead + AsyncRead + Unpin,
+    L: Logger,
 {
     let body_len = match decode::parse_header(header.filled()) {
         Ok(n) => n,
@@ -169,11 +170,15 @@ pub(super) async fn disconnect(mut stream: TcpStream) {
     std::mem::drop(stream);
 }
 
-pub(super) async fn send_message<W: AsyncWrite + Unpin>(
+pub(super) async fn send_message<W, L>(
     msg_buf: &MsgBuf,
     r: &mut W,
-    l: &mut impl Logger,
-) -> Result<(), SessionError> {
+    l: &L,
+) -> Result<(), SessionError>
+where
+    W: AsyncWrite + Unpin,
+    L: Logger,
+{
     r.write_all(&msg_buf[..]).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::BrokenPipe {
             SessionError::TcpDisconnection
@@ -199,7 +204,7 @@ mod test {
 
     struct MockLogger;
     impl Logger for MockLogger {
-        fn log_message(&mut self, _: &MsgBuf) -> Result<(), SessionError> {
+        fn log_message(&self, _: &MsgBuf) -> Result<(), SessionError> {
             Ok(())
         }
     }
@@ -300,7 +305,7 @@ mod test {
 
     #[tokio::test]
     async fn test_read_message() {
-        let mut mock_logger = MockLogger;
+        let mock_logger = MockLogger;
         let mut incoming_message = Cursor::new(b"8=FIX.4.2\x019=67\x0135=A\x0134=1\x0149=ISLD\x0152=20240506-13:59:15.021\x0156=TW\x0198=0\x01108=30\x01141=Y\x0110=003\x01".as_slice());
         let mut header_buf = HeaderBuf::<{ PEEK_LEN }>::new();
         assert!(read_header(&mut incoming_message, &mut header_buf)
@@ -309,14 +314,14 @@ mod test {
 
         let expected = MsgBuf(incoming_message.get_ref().to_vec());
         assert_eq!(
-            read_message(&mut incoming_message, &mut header_buf, &mut mock_logger)
+            read_message(&mut incoming_message, &mut header_buf, &mock_logger)
                 .await
                 .unwrap()
                 .0,
             expected.0,
         );
 
-        let mut incoming_message_bad_header = Cursor::new(b"8=FIX.5.2\x019=67\x0135=A\x0134=1\x0149=ISLD\x0152=20240506-13:59:15.021\x0156=TW\x0198=0\x01108=30\x01141=Y\x0110=003\x01".as_slice());
+        let mut incoming_message_bad_header = Cursor::new(b"8=INVALID\x019=67\x0135=A\x0134=1\x0149=ISLD\x0152=20240506-13:59:15.021\x0156=TW\x0198=0\x01108=30\x01141=Y\x0110=003\x01".as_slice());
         header_buf.clear();
         assert!(
             read_header(&mut incoming_message_bad_header, &mut header_buf)
@@ -327,7 +332,7 @@ mod test {
             read_message(
                 &mut incoming_message_bad_header,
                 &mut header_buf,
-                &mut mock_logger
+                &mock_logger
             )
             .await,
             Err(SessionError::GarbledMessage {
@@ -352,7 +357,7 @@ mod test {
             read_message(
                 &mut incoming_message_wrong_len,
                 &mut header_buf,
-                &mut mock_logger
+                &mock_logger
             )
             .await,
             Err(SessionError::GarbledMessage {

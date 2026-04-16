@@ -9,6 +9,7 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 
+use std::future::Future;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -20,24 +21,36 @@ enum LoggerRequest {
     Disconnect(oneshot::Sender<Result<(), SessionError>>),
 }
 
-pub(super) struct FileLogger {
+#[derive(Clone)]
+pub struct FileLogger {
     sender: mpsc::UnboundedSender<LoggerRequest>,
 }
 
-pub(super) trait Logger {
-    fn log_message(&mut self, msg: &MsgBuf) -> Result<(), SessionError>;
+pub trait Logger: Send + Sync {
+    fn log_message(&self, msg: &MsgBuf) -> Result<(), SessionError>;
+
+    fn disconnect(&self) -> impl Future<Output = Result<(), SessionError>> + Send {
+        Box::pin(std::future::ready(Ok(())))
+    }
 }
 
 impl Logger for FileLogger {
-    fn log_message(&mut self, buf: &MsgBuf) -> Result<(), SessionError> {
+    fn log_message(&self, buf: &MsgBuf) -> Result<(), SessionError> {
         let req = LoggerRequest::Log(format!("{}", buf), Instant::now());
         self.sender.send(req).map_err(to_io_err)?;
         Ok(())
     }
+
+    async fn disconnect(&self) -> Result<(), SessionError> {
+        let (sender, receiver) = oneshot::channel();
+        let req = LoggerRequest::Disconnect(sender);
+        self.sender.send(req).map_err(to_io_err)?;
+        receiver.await.map_err(to_io_err)?
+    }
 }
 
 impl FileLogger {
-    pub(super) async fn build(settings: &SessionSettings) -> Result<FileLogger> {
+    pub async fn build(settings: &SessionSettings) -> Result<FileLogger> {
         let log_path = &settings.log_dir;
         let sendercompid = settings.expected_sender_comp_id();
         let targetcompid = settings.expected_target_comp_id();
@@ -78,13 +91,6 @@ impl FileLogger {
         });
 
         Ok(FileLogger { sender })
-    }
-
-    pub(super) async fn disconnect(&mut self) -> Result<(), SessionError> {
-        let (sender, receiver) = oneshot::channel();
-        let req = LoggerRequest::Disconnect(sender);
-        self.sender.send(req).map_err(to_io_err)?;
-        receiver.await.map_err(to_io_err)?
     }
 }
 

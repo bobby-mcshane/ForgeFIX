@@ -17,7 +17,7 @@ use crate::fix::encode::{AdditionalHeaders, MessageBuilder, SerializedInt};
 use crate::fix::generated::{
     is_session_message, GapFillFlag, PossDupFlag, SessionRejectReason, Tags,
 };
-use crate::fix::log::{FileLogger, Logger};
+use crate::fix::log::Logger;
 use crate::fix::resend::Transformer;
 use crate::fix::session::{Event, MyStateMachine};
 use crate::fix::stopwatch::FixTimeouts;
@@ -36,10 +36,10 @@ use std::time::{Duration, Instant};
 pub mod decode;
 pub mod encode;
 pub mod generated;
+pub mod log;
 pub mod mem;
 
 mod checksum;
-mod log;
 mod resend;
 mod session;
 mod stopwatch;
@@ -57,7 +57,7 @@ mod vec_store;
 use vec_store as store;
 
 #[derive(Debug, Error)]
-enum SessionError {
+pub enum SessionError {
     #[error("An I/O error occured: {0}")]
     IoError(#[from] io::Error),
     #[error("A garbled message was received")]
@@ -84,7 +84,7 @@ enum SessionError {
 }
 
 #[derive(Debug)]
-enum GarbledMessageType {
+pub enum GarbledMessageType {
     BeginStringIssue,
     BodyLengthIssue,
     MsgTypeIssue,
@@ -299,17 +299,20 @@ impl SessionParserCallback<'_> {
     }
 }
 
-pub(super) async fn spin_session(
+pub(super) async fn spin_session<L>(
     mut stream: TcpStream,
     mut request_receiver: mpsc::UnboundedReceiver<Request>,
     message_received_event_sender: mpsc::UnboundedSender<Arc<MsgBuf>>,
     settings: SessionSettings,
-) -> Result<()> {
+    logger: L,
+) -> Result<()>
+where
+    L: Logger + Send + Sync + 'static,
+{
     // SETUP
 
     let additional_headers = AdditionalHeaders::build(&settings);
     let store = Store::build(&settings)?;
-    let mut logger = FileLogger::build(&settings).await?;
     let sequences = store.get_sequences(settings.epoch.clone()).await?;
     let mut state_machine = MyStateMachine::new(&settings, sequences);
 
@@ -345,7 +348,7 @@ pub(super) async fn spin_session(
             &settings,
             &store,
             Arc::clone(&epoch),
-            &mut logger,
+            &logger,
             &mut fix_timeouts,
         )
         .await?;
@@ -374,7 +377,7 @@ pub(super) async fn spin_session(
 
             maybe_err = stream::read_header(&mut stream, &mut header_buf) => {
                 let maybe_message = match maybe_err {
-                    Ok(()) => stream::read_message(&mut stream, &mut header_buf, &mut logger).await,
+                    Ok(()) => stream::read_message(&mut stream, &mut header_buf, &logger).await,
                     Err(SessionError::IoError(e)) => bail!("{e:?}"),
                     Err(e) => Err(e),
                 };
@@ -390,7 +393,7 @@ pub(super) async fn spin_session(
                     &store,
                     &settings,
                     &mut stream,
-                    &mut logger,
+                    &logger,
                     &additional_headers,
                     &message_received_event_sender,
                 ).await?;
@@ -457,17 +460,20 @@ fn handle_req(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_msg(
+async fn handle_msg<L>(
     maybe_msg: Result<MsgBuf, SessionError>,
     state_machine: &mut MyStateMachine,
     fix_timeouts: &mut FixTimeouts,
     store: &Store,
     settings: &SessionSettings,
     stream: &mut TcpStream,
-    logger: &mut impl Logger,
+    logger: &L,
     additional_headers: &AdditionalHeaders,
     message_received_event_sender: &mpsc::UnboundedSender<Arc<MsgBuf>>,
-) -> Result<()> {
+) -> Result<()>
+where
+    L: Logger + Send + Sync,
+{
     fix_timeouts.reset_test_request();
 
     let msg = match maybe_msg {
@@ -633,14 +639,17 @@ async fn handle_msg(
     Ok(())
 }
 
-async fn disconnect(
+async fn disconnect<L>(
     mut request_receiver: mpsc::UnboundedReceiver<Request>,
     store: Store,
     epoch: Arc<String>,
     state_machine: &MyStateMachine,
     stream: TcpStream,
-    mut logger: FileLogger,
-) -> Result<()> {
+    logger: L,
+) -> Result<()>
+where
+    L: Logger + Send + Sync,
+{
     request_receiver.close();
     store.set_sequences(
         epoch,
@@ -677,16 +686,19 @@ async fn receive_logon_request(
     }
 }
 
-async fn send_outgoing_messages(
+async fn send_outgoing_messages<L>(
     state_machine: &mut MyStateMachine,
     stream: &mut TcpStream,
     additional_headers: &AdditionalHeaders,
     settings: &SessionSettings,
     store: &Store,
     epoch: Arc<String>,
-    logger: &mut impl Logger,
+    logger: &L,
     fix_timeouts: &mut FixTimeouts,
-) -> Result<(), SessionError> {
+) -> Result<(), SessionError>
+where
+    L: Logger + Send + Sync,
+{
     if !state_machine.outbox.is_empty() {
         fix_timeouts.reset_heartbeat();
     }
@@ -728,13 +740,16 @@ async fn send_outgoing_messages(
     Ok(())
 }
 
-async fn resend_messages(
+async fn resend_messages<L>(
     mut messages: Vec<(u32, Vec<u8>)>,
     stream: &mut TcpStream,
     additional_headers: &AdditionalHeaders,
     settings: &SessionSettings,
-    logger: &mut impl Logger,
-) -> Result<(), SessionError> {
+    logger: &L,
+) -> Result<(), SessionError>
+where
+    L: Logger + Send + Sync,
+{
     messages.sort_by(|(a, _), (b, _)| a.cmp(b));
     let mut session_msg_count = 0;
     for (_, (msg_seq_num, msg)) in messages.iter().enumerate() {

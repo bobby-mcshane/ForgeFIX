@@ -28,7 +28,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> Result<(), ApplicationError> {
-//!     
+//!
 //!     // build session settings
 //!     let settings = SessionSettings::builder()
 //!         .with_sender_comp_id("my_id")
@@ -92,7 +92,7 @@
 //!     // send messages here...
 //!
 //!     fix_handle.end_sync()?;
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -107,10 +107,13 @@
 
 pub mod fix;
 use fix::encode::MessageBuilder;
+use fix::log::{FileLogger, Logger};
 use fix::mem::MsgBuf;
 
+use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -121,6 +124,11 @@ use tokio::sync::{mpsc, oneshot};
 use anyhow::Result as AnyhowResult;
 use chrono::naive::NaiveTime;
 use chrono::{DateTime, Utc};
+
+type LoggerFactory<L> =
+    fn(
+        &SessionSettings,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<L, ApplicationError>> + Send>>;
 
 enum Request {
     Logon {
@@ -490,7 +498,7 @@ pub fn set_persisted_sequence_numbers(
 /// let (res1, res2) = tokio::join!(h1, h2);
 /// res1??;
 /// res2??;
-///     
+///
 /// // end the FIX connection
 /// handle.end_async().await?;
 ///  #   Ok(())
@@ -665,26 +673,46 @@ impl FixApplicationHandle {
 }
 
 /// A struct that can initiate the TCP connection to the peer and create a FIX engine instance.
-pub struct FixApplicationInitiator {
+pub struct FixApplicationInitiator<L: Logger = FileLogger> {
     settings: SessionSettings,
     stream_factory: StreamFactory,
+    logger: Option<L>,
 }
 
-impl FixApplicationInitiator {
+impl FixApplicationInitiator<FileLogger> {
     /// Build a `FixApplicationInitiator` that will create a FIX engine using `settings`.
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         mut settings: SessionSettings,
-    ) -> Result<FixApplicationInitiator, ApplicationError> {
+    ) -> Result<FixApplicationInitiator<FileLogger>, ApplicationError> {
         settings.engine_type = FixEngineType::Client;
         let stream_factory = StreamFactory::build(&settings)?;
         let fix_app_client = FixApplicationInitiator {
             settings,
             stream_factory,
+            logger: None,
         };
         Ok(fix_app_client)
     }
+}
 
+impl<L: Logger + Send + Sync + 'static> FixApplicationInitiator<L> {
+    pub fn with_logger<L2>(self, logger: L2) -> FixApplicationInitiator<L2>
+    where
+        L2: Logger + Send + Sync + 'static,
+    {
+        FixApplicationInitiator {
+            settings: self.settings,
+            stream_factory: self.stream_factory,
+            logger: Some(logger),
+        }
+    }
+}
+
+impl<L> FixApplicationInitiator<L>
+where
+    L: Logger + Send + Sync + 'static,
+{
     /// Initiate a TCP connection and start the FIX engine with the current asynchronous runtime.
     ///
     /// If the connection is successfully made, a [`FixApplicationHandle`] will be returned, and an
@@ -707,18 +735,42 @@ impl FixApplicationInitiator {
             mpsc::unbounded_channel::<Arc<MsgBuf>>();
         let begin_string = Arc::clone(&self.settings.begin_string);
 
-        tokio::spawn(async move {
-            if let Err(e) = fix::spin_session(
-                stream,
-                request_receiver,
-                app_message_event_sender,
-                self.settings,
-            )
-            .await
-            {
-                eprintln!("{e:?}");
+        match self.logger {
+            Some(logger) => {
+                tokio::spawn(async move {
+                    if let Err(e) = fix::spin_session(
+                        stream,
+                        request_receiver,
+                        app_message_event_sender,
+                        self.settings,
+                        logger,
+                    )
+                    .await
+                    {
+                        eprintln!("{e:?}");
+                    }
+                });
             }
-        });
+            None => {
+                let logger = FileLogger::build(&self.settings).await.map_err(|err| {
+                    ApplicationError::IoError(io::Error::new(io::ErrorKind::Other, err))
+                })?;
+
+                tokio::spawn(async move {
+                    if let Err(e) = fix::spin_session(
+                        stream,
+                        request_receiver,
+                        app_message_event_sender,
+                        self.settings,
+                        logger,
+                    )
+                    .await
+                    {
+                        eprintln!("{e:?}");
+                    }
+                });
+            }
+        }
 
         let handle = FixApplicationHandle {
             request_sender,
@@ -740,16 +792,41 @@ impl FixApplicationInitiator {
         let begin_string = Arc::clone(&self.settings.begin_string);
         let stream = runtime.block_on(self.stream_factory.stream())?;
 
-        std::thread::spawn(move || {
-            if let Err(e) = runtime.block_on(fix::spin_session(
-                stream,
-                request_receiver,
-                app_message_event_sender,
-                self.settings,
-            )) {
-                eprintln!("{e:?}");
+        match self.logger {
+            Some(logger) => {
+                std::thread::spawn(move || {
+                    if let Err(e) = runtime.block_on(fix::spin_session(
+                        stream,
+                        request_receiver,
+                        app_message_event_sender,
+                        self.settings,
+                        logger,
+                    )) {
+                        eprintln!("{e:?}");
+                    }
+                });
             }
-        });
+            None => {
+                let logger = runtime.block_on(async {
+                    FileLogger::build(&self.settings).await.map_err(|err| {
+                        ApplicationError::IoError(io::Error::new(io::ErrorKind::Other, err))
+                    })
+                })?;
+
+                std::thread::spawn(move || {
+                    if let Err(e) = runtime.block_on(fix::spin_session(
+                        stream,
+                        request_receiver,
+                        app_message_event_sender,
+                        self.settings,
+                        logger,
+                    )) {
+                        eprintln!("{e:?}");
+                    }
+                });
+            }
+        }
+
         let handle = FixApplicationHandle {
             request_sender,
             begin_string,
@@ -771,24 +848,39 @@ impl FixApplicationInitiator {
 }
 
 /// A struct that can accept TCP connections, and create a FIX engine instance for each connection.
-pub struct FixApplicationAcceptor {
+pub struct FixApplicationAcceptor<L: Logger = FileLogger> {
     settings: SessionSettings,
     stream_factory: StreamFactory,
+    logger: Option<L>,
 }
 
-impl FixApplicationAcceptor {
+impl FixApplicationAcceptor<FileLogger> {
     /// Build a `FixApplicationAcceptor` from `settings`.
     #[allow(clippy::too_many_arguments)]
     pub fn build(
         mut settings: SessionSettings,
-    ) -> Result<FixApplicationAcceptor, ApplicationError> {
+    ) -> Result<FixApplicationAcceptor<FileLogger>, ApplicationError> {
         settings.engine_type = FixEngineType::Server;
         let stream_factory = StreamFactory::build(&settings)?;
         let fix_app_server = FixApplicationAcceptor {
             settings,
             stream_factory,
+            logger: None,
         };
         Ok(fix_app_server)
+    }
+}
+
+impl<L: Logger + Send + Sync + Clone + 'static> FixApplicationAcceptor<L> {
+    pub fn with_logger<L2>(self, logger: L2) -> FixApplicationAcceptor<L2>
+    where
+        L2: Logger + Send + Sync + 'static,
+    {
+        FixApplicationAcceptor {
+            settings: self.settings,
+            stream_factory: self.stream_factory,
+            logger: Some(logger),
+        }
     }
 
     /// Accept an incoming TCP connection and create a FIX engine.
@@ -806,14 +898,42 @@ impl FixApplicationAcceptor {
             mpsc::unbounded_channel::<Arc<MsgBuf>>();
         let begin_string = Arc::clone(&self.settings.begin_string);
 
-        tokio::task::spawn(async move {
-            if let Err(e) =
-                fix::spin_session(stream, request_receiver, app_message_event_sender, settings)
+        match self.logger.clone() {
+            Some(logger) => {
+                tokio::task::spawn(async move {
+                    if let Err(e) = fix::spin_session(
+                        stream,
+                        request_receiver,
+                        app_message_event_sender,
+                        settings,
+                        logger,
+                    )
                     .await
-            {
-                eprintln!("{e:?}");
+                    {
+                        eprintln!("{e:?}");
+                    }
+                });
             }
-        });
+            None => {
+                let logger = FileLogger::build(&self.settings).await.map_err(|err| {
+                    ApplicationError::IoError(io::Error::new(io::ErrorKind::Other, err))
+                })?;
+
+                tokio::task::spawn(async move {
+                    if let Err(e) = fix::spin_session(
+                        stream,
+                        request_receiver,
+                        app_message_event_sender,
+                        settings,
+                        logger,
+                    )
+                    .await
+                    {
+                        eprintln!("{e:?}");
+                    }
+                });
+            }
+        }
 
         let handle = FixApplicationHandle {
             request_sender,
