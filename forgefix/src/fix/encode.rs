@@ -306,6 +306,7 @@ impl AdditionalHeaders {
         AdditionalHeaders::new(comp_id_headers(
             &settings.sender_comp_id,
             &settings.target_comp_id,
+            settings.target_sub_id.as_deref(),
         ))
     }
 
@@ -333,8 +334,8 @@ impl AdditionalHeaders {
     }
 }
 
-fn comp_id_headers(sender_comp_id: &str, target_comp_id: &str) -> Vec<(u32, Vec<u8>)> {
-    vec![
+fn comp_id_headers(sender_comp_id: &str, target_comp_id: &str, target_sub_id: Option<&str>) -> Vec<(u32, Vec<u8>)> {
+    let mut headers = vec![
         (
             u32::from(Tags::SenderCompID),
             sender_comp_id.as_bytes().to_vec(),
@@ -343,7 +344,14 @@ fn comp_id_headers(sender_comp_id: &str, target_comp_id: &str) -> Vec<(u32, Vec<
             u32::from(Tags::TargetCompID),
             target_comp_id.as_bytes().to_vec(),
         ),
-    ]
+    ];
+    if let Some(sub_id) = target_sub_id {
+        headers.push((
+            u32::from(Tags::TargetSubID),
+            sub_id.as_bytes().to_vec(),
+        ));
+    }
+    headers
 }
 
 #[cfg(test)]

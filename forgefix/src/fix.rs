@@ -122,6 +122,7 @@ struct SessionParserCallback<'a> {
     msg_seq_num: u32,
     sender_comp_id: Option<&'a [u8]>,
     target_comp_id: Option<&'a [u8]>,
+    target_sub_id: Option<&'a [u8]>,
     poss_dup_flag: Option<char>,
     gap_fill: Option<char>,
     new_seq_no: Option<u32>,
@@ -160,6 +161,9 @@ impl<'a> crate::fix::decode::ParserCallback<'a> for SessionParserCallback<'a> {
             }
             Ok(Tags::SenderCompID) => {
                 self.sender_comp_id = Some(value);
+            }
+            Ok(Tags::TargetSubID) => {
+                self.target_sub_id = Some(value);
             }
             Ok(Tags::PossDupFlag) => {
                 if value.len() == 1 {
@@ -502,6 +506,7 @@ where
         cb.msg_seq_num,
         cb.target_comp_id,
         cb.sender_comp_id,
+        cb.target_sub_id,
         cb.sending_time,
         cb.poss_dup_flag,
         cb.orig_sending_time,
@@ -823,6 +828,7 @@ fn customize_initiator_logon(
         begin_string: &settings.begin_string,
         sender_comp_id: &settings.sender_comp_id,
         target_comp_id: &settings.target_comp_id,
+        target_sub_id: settings.target_sub_id.as_deref(),
         msg_seq_num,
         sending_time,
         heart_bt_int_secs: settings.heartbeat_timeout.as_secs() as u32,

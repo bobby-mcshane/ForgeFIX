@@ -173,6 +173,7 @@ pub struct InitiatorLogonContext<'a> {
     pub begin_string: &'a str,
     pub sender_comp_id: &'a str,
     pub target_comp_id: &'a str,
+    pub target_sub_id: Option<&'a str>,
     pub msg_seq_num: u32,
     pub sending_time: DateTime<Utc>,
     pub heart_bt_int_secs: u32,
@@ -196,6 +197,7 @@ pub struct SessionSettings {
     engine_type: FixEngineType,
     sender_comp_id: String,
     target_comp_id: String,
+    target_sub_id: Option<String>,
     addr: SocketAddr,
     epoch: Arc<String>,
     store_path: PathBuf,
@@ -217,6 +219,7 @@ pub struct SessionSettings {
 pub struct SessionSettingsBuilder {
     sender_comp_id: Option<String>,
     target_comp_id: Option<String>,
+    target_sub_id: Option<String>,
     addr: Option<SocketAddr>,
     begin_string: Option<String>,
     epoch: Option<String>,
@@ -257,6 +260,15 @@ impl SessionSettingsBuilder {
     }
     pub fn set_target_comp_id(&mut self, target_comp_id: &str) {
         self.target_comp_id = Some(target_comp_id.to_string());
+    }
+
+    /// The `TargetSubID(57)` that will be included in each message.
+    pub fn with_target_sub_id(mut self, target_sub_id: Option<&str>) -> Self {
+        self.set_target_sub_id(target_sub_id);
+        self
+    }
+    pub fn set_target_sub_id(&mut self, target_sub_id: Option<&str>) {
+        self.target_sub_id = target_sub_id.map(String::from);
     }
 
     /// The address to initiate a connection to, or accept connections on.
@@ -361,6 +373,7 @@ impl SessionSettingsBuilder {
             start_time: self.start_time.unwrap_or_default(),
             sender_comp_id,
             target_comp_id,
+            target_sub_id: self.target_sub_id,
             addr,
             store_path,
             log_dir,
