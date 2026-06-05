@@ -13,6 +13,7 @@ pub(super) fn validate_msg<'a>(
     msg_seq_num: u32,
     target_comp_id: Option<&'a [u8]>,
     sender_comp_id: Option<&'a [u8]>,
+    _target_sub_id: Option<&'a [u8]>,
     sending_time: Option<DateTime<Utc>>,
     poss_dup_flag: Option<char>,
     orig_sending_time: Option<DateTime<Utc>>,
