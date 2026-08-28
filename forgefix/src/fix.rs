@@ -874,8 +874,11 @@ async fn is_new_session(store: &Store, settings: &SessionSettings) -> Result<boo
         return Ok(false);
     }
     let last_send_time = store.last_send_time(settings.epoch.clone()).await?;
-    let start_time = NaiveDateTime::new(Utc::now().date_naive(), settings.start_time).and_utc();
-    Ok(last_send_time < Some(start_time))
+    let session_start = match settings.session_start_instant {
+        Some(instant) => instant,
+        None => NaiveDateTime::new(Utc::now().date_naive(), settings.start_time).and_utc(),
+    };
+    Ok(last_send_time < Some(session_start))
 }
 
 #[cfg(test)]

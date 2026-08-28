@@ -204,6 +204,7 @@ pub struct SessionSettings {
     log_dir: PathBuf,
     heartbeat_timeout: Duration,
     start_time: NaiveTime,
+    session_start_instant: Option<DateTime<Utc>>,
     initiator_logon_hook: Option<Arc<dyn InitiatorLogonHook>>,
 }
 
@@ -227,6 +228,7 @@ pub struct SessionSettingsBuilder {
     log_dir: Option<PathBuf>,
     heartbeat_timeout: Option<Duration>,
     start_time: Option<NaiveTime>,
+    session_start_instant: Option<DateTime<Utc>>,
     initiator_logon_hook: Option<Arc<dyn InitiatorLogonHook>>,
 }
 
@@ -242,6 +244,24 @@ impl SessionSettingsBuilder {
     }
     pub fn set_start_time(&mut self, start_time: NaiveTime) {
         self.start_time = Some(start_time);
+    }
+
+    /// The instant the current session day began.
+    ///
+    /// When set, a logon is treated as the first of a new session day (sequence
+    /// numbers reset to 1 and `ResetSeqNumFlag(141)=Y` sent) if and only if
+    /// nothing has been sent since this instant. Takes precedence over
+    /// [`with_start_time`], which approximates the session day as a fixed UTC
+    /// time-of-day and misbehaves for sessions whose day boundary does not
+    /// align with midnight UTC.
+    ///
+    /// [`with_start_time`]: SessionSettingsBuilder::with_start_time
+    pub fn with_session_start_instant(mut self, instant: DateTime<Utc>) -> Self {
+        self.set_session_start_instant(instant);
+        self
+    }
+    pub fn set_session_start_instant(&mut self, instant: DateTime<Utc>) {
+        self.session_start_instant = Some(instant);
     }
 
     /// The `SenderCompID(49)` that will be included in each message.
@@ -371,6 +391,7 @@ impl SessionSettingsBuilder {
             ))),
             heartbeat_timeout: self.heartbeat_timeout.unwrap_or(Duration::from_secs(30)),
             start_time: self.start_time.unwrap_or_default(),
+            session_start_instant: self.session_start_instant,
             sender_comp_id,
             target_comp_id,
             target_sub_id: self.target_sub_id,
