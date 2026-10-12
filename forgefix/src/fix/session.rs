@@ -312,7 +312,7 @@ impl MyStateMachine {
                     &Some(SessionRejectReason::VALUE_IS_INCORRECT),
                     &msg_seq_num,
                     &None,
-                    &Some(char::from(MsgType::SEQUENCE_RESET)),
+                    &Some(char::from(MsgType::SEQUENCE_RESET).to_string()),
                 );
                 self.outbox_push(builder);
             }
@@ -633,7 +633,7 @@ impl MyStateMachine {
             Event::SessionErrorReceived { error } => {
                 match error {
                     SessionError::MessageRejected { ref_msg_type, .. }
-                        if *ref_msg_type == Some(MsgType::LOGON.into()) =>
+                        if *ref_msg_type == Some(char::from(MsgType::LOGON).to_string()) =>
                     {
                         let builder = build_logout_message(&self.begin_string);
                         self.outbox_push(builder);
@@ -725,7 +725,7 @@ fn build_message_reject(
     reject_reason: &Option<SessionRejectReason>,
     msg_seq_num: &u32,
     ref_tag_id: &Option<u32>,
-    ref_msg_type: &Option<char>,
+    ref_msg_type: &Option<String>,
 ) -> MessageBuilder {
     let mut builder: MessageBuilder = MessageBuilder::new(begin_string, MsgType::REJECT.into())
         .push(
@@ -737,11 +737,8 @@ fn build_message_reject(
     if let Some(t) = ref_tag_id {
         builder = builder.push(Tags::RefTagID, SerializedInt::from(*t).as_bytes());
     }
-    if !ref_msg_type.is_none() && *ref_msg_type != Some('0') {
-        builder = builder.push(
-            Tags::RefMsgType,
-            (*ref_msg_type).unwrap().to_string().as_bytes(),
-        )
+    if let Some(t) = ref_msg_type.as_deref().filter(|t| *t != "0") {
+        builder = builder.push(Tags::RefMsgType, t.as_bytes())
     }
     if let Some(r) = reject_reason {
         builder = builder.push(
