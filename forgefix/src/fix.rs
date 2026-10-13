@@ -484,7 +484,10 @@ where
     let msg = match maybe_msg {
         Ok(b) => Arc::new(b),
         Err(error) => {
-            state_machine.handle(&Event::SessionErrorReceived { error });
+            state_machine.handle(&Event::SessionErrorReceived {
+                error,
+                poss_dup: None,
+            });
             return Ok(());
         }
     };
@@ -494,7 +497,10 @@ where
     let mut cb: SessionParserCallback = Default::default();
 
     if let Err(error) = crate::fix::decode::parse(&msg.as_ref()[..], &mut cb) {
-        state_machine.handle(&Event::SessionErrorReceived { error });
+        state_machine.handle(&Event::SessionErrorReceived {
+            error,
+            poss_dup: to_poss_dup_flag(cb.poss_dup_flag),
+        });
         return Ok(());
     };
 
@@ -515,12 +521,18 @@ where
         cb.begin_seq_no,
         cb.end_seq_no,
     ) {
-        state_machine.handle(&Event::SessionErrorReceived { error });
+        state_machine.handle(&Event::SessionErrorReceived {
+            error,
+            poss_dup: to_poss_dup_flag(cb.poss_dup_flag),
+        });
         return Ok(());
     }
 
     if let Err(error) = validate::validate_checksum(&msg) {
-        state_machine.handle(&Event::SessionErrorReceived { error });
+        state_machine.handle(&Event::SessionErrorReceived {
+            error,
+            poss_dup: None,
+        });
         return Ok(());
     }
 
@@ -616,7 +628,8 @@ where
                 to_poss_dup_flag(cb.poss_dup_flag),
             ));
         }
-        None => {
+        // session_type() names only the seven session types matched above.
+        _ => {
             if session::should_pass_app_message(state_machine, msg_seq_num) {
                 let _ = message_received_event_sender.send(Arc::clone(&msg));
             }
@@ -624,15 +637,6 @@ where
                 msg_seq_num,
                 to_poss_dup_flag(cb.poss_dup_flag),
             ));
-        }
-        _ => {
-            let error = SessionError::new_message_rejected(
-                Some(SessionRejectReason::INVALID_MSGTYPE),
-                cb.msg_seq_num,
-                None,
-                None,
-            );
-            state_machine.handle(&Event::SessionErrorReceived { error });
         }
     }
 
