@@ -366,6 +366,22 @@ impl MyStateMachine {
         let poss_dup = event.is_poss_dup();
         let sender_comp_id = Arc::clone(&self.sender_comp_id);
         let target_comp_id = Arc::clone(&self.target_comp_id);
+        // A message in the resend range that fails validation is consumed like any other:
+        // answer it with a Reject (post_logon) and move past it. Otherwise the range never
+        // completes, every later replayed message is skipped as out of order, and the
+        // session stalls.
+        if let Event::SessionErrorReceived {
+            error: SessionError::MessageRejected { msg_seq_num, .. },
+        } = event
+        {
+            if self.rereceive_range.map(|(next, _)| next) == Some(*msg_seq_num) {
+                if let Response::Transition(state) = self.post_logon(event) {
+                    return Response::Transition(state);
+                }
+                return self.advance_resend_range(*msg_seq_num + 1, &return_state);
+            }
+        }
+
         let (next, end) = match self.rereceive_range.as_mut() {
             Some(v) => v,
             None => return Response::Transition(State::Error),
@@ -429,25 +445,35 @@ impl MyStateMachine {
             _ => *next + 1,
         };
 
+        self.advance_resend_range(next_seq_num, &return_state)
+    }
+
+    /// Moves the resend range's next expected seq to `next_seq_num`. Once it passes the
+    /// end of the range, restores normal sequencing and returns to `return_state`.
+    fn advance_resend_range(&mut self, next_seq_num: u32, return_state: &State) -> Response {
+        let Some((next, end)) = self.rereceive_range.as_mut() else {
+            return Response::Transition(State::Error);
+        };
         *next = next_seq_num;
-        if next > end {
-            debug!(
-                target: "forgefix_seq",
-                "resend range complete; sender={} target={} state={} expected_incoming -> {}",
-                sender_comp_id.as_str(),
-                target_comp_id.as_str(),
-                state_name,
-                next
-            );
-            let _ = self.sequences.reset_incoming(*next);
-            self.rereceive_range = None;
-            if matches!(*return_state, State::End) {
-                let message = build_logout_message(&self.begin_string);
-                self.outbox_push(message);
-            }
-            return Response::Transition((*return_state).clone());
+        if *next <= *end {
+            return Response::Handled;
         }
-        Response::Handled
+        let (sender_comp_id, target_comp_id) = self.comp_ids();
+        debug!(
+            target: "forgefix_seq",
+            "resend range complete; sender={} target={} state={} expected_incoming -> {}",
+            sender_comp_id,
+            target_comp_id,
+            self.state_name(),
+            next_seq_num
+        );
+        let _ = self.sequences.reset_incoming(next_seq_num);
+        self.rereceive_range = None;
+        if matches!(return_state, State::End) {
+            let message = build_logout_message(&self.begin_string);
+            self.outbox_push(message);
+        }
+        Response::Transition(return_state.clone())
     }
 
     fn expecting_test_response(&mut self, event: &Event) -> Response {

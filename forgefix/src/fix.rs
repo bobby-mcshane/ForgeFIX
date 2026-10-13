@@ -1219,6 +1219,29 @@ mod test {
         assert_eq!(next_incoming, 4);
     }
 
+    /// Resend recovery where the replayed message is NOT accepted: it must be answered
+    /// with a Reject and consumed, so the gap fill that follows completes the range and the
+    /// session catches up. Before, the rejected message never advanced the resend range,
+    /// every later replay was skipped as out of order, and the session stalled.
+    #[tokio::test]
+    async fn rejected_message_in_resend_range_is_consumed_and_session_recovers() {
+        let sending_time = Utc::now().format("%Y%m%d-%H:%M:%S%.3f");
+        let poss_dup = format!("43=Y\x01122={sending_time}\x01");
+        let (delivered, next_incoming) = run_inbound(
+            5,
+            &[],
+            vec![
+                inbound_msg("A", 20, "98=0\x01108=30\x01"),
+                inbound_msg("UMS", 5, &format!("{poss_dup}55=TEST\x01")),
+                inbound_msg("4", 6, &format!("{poss_dup}123=Y\x0136=21\x01")),
+                inbound_msg("8", 21, "11=order-1\x0139=2\x01150=F\x01"),
+            ],
+        )
+        .await;
+        assert_eq!(delivered, ["8"]);
+        assert_eq!(next_incoming, 22);
+    }
+
     #[test]
     fn invalid_accepted_msg_type_fails_at_build() {
         for bad in ["", "ABCDE", "U S", "U\u{1}S"] {
