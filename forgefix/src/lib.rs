@@ -1164,16 +1164,38 @@ impl StreamFactory {
             }
         }
     }
+    /// Returns the session's TCP stream with `TCP_NODELAY` set: a FIX message is small and
+    /// latency-bound, and Nagle's algorithm would hold it while an earlier segment is unacked.
     async fn stream(&self) -> Result<TcpStream, std::io::Error> {
-        match self {
-            StreamFactory::Server(listener) => {
-                let (stream, _from_addr) = listener.accept().await?;
-                Ok(stream)
-            }
-            StreamFactory::Client(addr) => {
-                let socket = TcpSocket::new_v4()?;
-                Ok(socket.connect(*addr).await?)
-            }
-        }
+        let stream = match self {
+            StreamFactory::Server(listener) => listener.accept().await?.0,
+            StreamFactory::Client(addr) => TcpSocket::new_v4()?.connect(*addr).await?,
+        };
+        stream.set_nodelay(true)?;
+        Ok(stream)
+    }
+}
+
+#[cfg(test)]
+mod stream_factory_tests {
+    use super::*;
+
+    // Nagle's algorithm holds a small write while an earlier segment is unacknowledged.
+    // FIX messages are small and latency-bound, so every session socket must set TCP_NODELAY.
+    #[tokio::test]
+    async fn client_stream_sets_nodelay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let factory = StreamFactory::Client(listener.local_addr().unwrap());
+        let (stream, _accepted) = tokio::join!(factory.stream(), listener.accept());
+        assert!(stream.unwrap().nodelay().unwrap());
+    }
+
+    #[tokio::test]
+    async fn server_stream_sets_nodelay() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let factory = StreamFactory::Server(listener);
+        let (stream, _peer) = tokio::join!(factory.stream(), TcpStream::connect(addr));
+        assert!(stream.unwrap().nodelay().unwrap());
     }
 }
